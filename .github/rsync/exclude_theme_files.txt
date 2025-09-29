@@ -1,0 +1,4 @@
+/deploy_key
+.vscode
+node_modules/
+/.cache

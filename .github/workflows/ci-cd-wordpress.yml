@@ -1,0 +1,167 @@
+name: WordPress CI/CD
+
+on:
+  push:
+    branches: [ dev, stage, master ]
+    paths-ignore: [ wordpress/wp-content/themes/twentytwentyfive/**, .github/workflows/ci-cd-theme.yml, README.md ]
+  workflow_dispatch:
+
+defaults:
+  run:
+    working-directory: wordpress
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Export a .env file to environment variables
+      uses: c-py/action-dotenv-to-setenv@v5
+      with:
+        env-file: .github/.env
+
+    - name: Define dev variables
+      if: github.ref == 'refs/heads/dev'
+      run: |
+        echo "SSH_USER=$SSH_USER_DEV" >> $GITHUB_ENV
+        echo "OWNER_USER=$OWNER_USER_DEV" >> $GITHUB_ENV
+        echo "OWNER_GROUP=$OWNER_GROUP_DEV" >> $GITHUB_ENV               
+        echo "SSH_IP=$SSH_IP_DEV" >> $GITHUB_ENV
+        echo "SITE_PATH=$SITE_PATH_DEV" >> $GITHUB_ENV
+        echo "SSH_PORT=$SSH_PORT_DEV" >> $GITHUB_ENV
+    
+    - name: Define stage variables
+      if: github.ref == 'refs/heads/stage'
+      run: |
+        echo "SSH_USER=$SSH_USER_STAGE" >> $GITHUB_ENV
+        echo "OWNER_USER=$OWNER_USER_STAGE" >> $GITHUB_ENV
+        echo "OWNER_GROUP=$OWNER_GROUP_STAGE" >> $GITHUB_ENV               
+        echo "SSH_IP=$SSH_IP_STAGE" >> $GITHUB_ENV
+        echo "SITE_PATH=$SITE_PATH_STAGE" >> $GITHUB_ENV
+        echo "SSH_PORT=$SSH_PORT_STAGE" >> $GITHUB_ENV
+
+    - name: Define production variables
+      if: github.ref == 'refs/heads/master'
+      run: |
+        echo "SSH_USER=$SSH_USER_PROD" >> $GITHUB_ENV
+        echo "OWNER_USER=$OWNER_USER_PROD" >> $GITHUB_ENV
+        echo "OWNER_GROUP=$OWNER_GROUP_PROD" >> $GITHUB_ENV
+        echo "SSH_IP=$SSH_IP_PROD" >> $GITHUB_ENV 
+        echo "SITE_PATH=$SITE_PATH_PROD" >> $GITHUB_ENV
+        echo "SSH_PORT=$SSH_PORT_PROD" >> $GITHUB_ENV
+
+    - name: Get composer cache directory
+      id: composer-cache
+      run: echo "COMPOSER_DIR=$(composer config cache-files-dir)" >> $GITHUB_OUTPUT 
+
+    - uses: actions/cache@v4
+      with:
+        path: ${{ steps.composer-cache.outputs.COMPOSER_DIR }}
+        key: ${{ runner.os }}-composer-${{ hashFiles('**/composer.lock') }}
+        restore-keys: ${{ runner.os }}-composer-
+
+    - name: Install dependencies
+      run: composer install --no-interaction --optimize-autoloader --no-dev
+    
+    - name: Set deploy Key
+      run: |
+        echo -e "${{ secrets.WP_CARE_KEY }}" > deploy_key
+        chmod 600 ./deploy_key     
+
+    - name: Simule rsync - dev
+      if: github.ref == 'refs/heads/dev'
+      run: |
+        rsync -ahrvzKO --rsync-path="sudo rsync" --chown=$OWNER_USER:$OWNER_GROUP \
+          --dry-run --verbose --itemize-changes \
+          -e "ssh -p $SSH_PORT -i ./deploy_key -oStrictHostKeyChecking=no" \
+          --exclude-from='../.github/rsync/exclude_files.txt' \
+          --filter='merge ../.github/rsync/filter_files.txt' \
+          --delete-excluded --chmod='D755,F644' \
+          ./ $SSH_USER@$SSH_IP:$SITE_PATH
+          
+        rsync_status=$?
+        echo $rsync_status
+        
+        if (($rsync_status != 0)); then
+          echo 'Ocorreu um erro na simulação!'
+          exit 1
+        else
+          echo '👽 Ocorreu tudo bem na simulação!'
+        fi       
+        
+    - name: Rsync - dev
+      if: github.ref == 'refs/heads/dev'
+      run: |
+        rsync -ahrvzKO --rsync-path="sudo rsync" --chown=$OWNER_USER:$OWNER_GROUP \
+          -e "ssh -p $SSH_PORT -i ./deploy_key -oStrictHostKeyChecking=no" \
+          --exclude-from='../.github/rsync/exclude_files.txt' \
+          --filter='merge ../.github/rsync/filter_files.txt' \
+          --quiet --delete-excluded --chmod='D755,F644' \
+          ./ $SSH_USER@$SSH_IP:$SITE_PATH
+        echo 'Tudo certo! 🍕'
+
+    - name: Simule rsync - stage
+      if: github.ref == 'refs/heads/stage'
+      run: |
+        rsync -ahrvzKO --rsync-path="sudo rsync" --chown=$OWNER_USER:$OWNER_GROUP \
+          --dry-run --verbose --itemize-changes \
+          -e "ssh -p $SSH_PORT -i ./deploy_key -oStrictHostKeyChecking=no" \
+          --exclude-from='../.github/rsync/exclude_files.txt' \
+          --filter='merge ../.github/rsync/filter_files.txt' \
+          --delete-excluded --chmod='D755,F644' \
+          ./ $SSH_USER@$SSH_IP:$SITE_PATH
+          
+        rsync_status=$?
+        echo $rsync_status
+        
+        if (($rsync_status != 0)); then
+          echo 'Ocorreu um erro na simulação!'
+          exit 1
+        else
+          echo '👽 Ocorreu tudo bem na simulação!'
+        fi       
+        
+    - name: Rsync - stage
+      if: github.ref == 'refs/heads/stage'
+      run: |
+        rsync -ahrvzKO --rsync-path="sudo rsync" --chown=$OWNER_USER:$OWNER_GROUP \
+          -e "ssh -p $SSH_PORT -i ./deploy_key -oStrictHostKeyChecking=no" \
+          --exclude-from='../.github/rsync/exclude_files.txt' \
+          --filter='merge ../.github/rsync/filter_files.txt' \
+          --quiet --delete-excluded --chmod='D755,F644' \
+          ./ $SSH_USER@$SSH_IP:$SITE_PATH
+        echo 'Tudo certo! 🍕'
+
+    - name: Simule rsync - MASTER
+      if: github.ref == 'refs/heads/master' 
+      run: |
+        rsync -ahrvzKO --chown=$OWNER_USER:$OWNER_GROUP \
+          --dry-run --verbose --itemize-changes \
+          -e "ssh -p $SSH_PORT -i ./deploy_key -oStrictHostKeyChecking=no" \
+          --exclude-from='../.github/rsync/exclude_files.txt' \
+          --filter='merge ../.github/rsync/filter_files.txt' \
+          --delete-excluded --chmod='D755,F644' \
+          ./ $SSH_USER@$SSH_IP:$SITE_PATH
+          
+        rsync_status=$?
+        echo $rsync_status
+        
+        if (($rsync_status != 0)); then
+          echo 'Ocorreu um erro na simulação!'
+          exit 1
+        else
+          echo '👽 Ocorreu tudo bem na simulação!'
+        fi       
+
+    - name: Rsync - MASTER
+      if: github.ref == 'refs/heads/master'
+      run: |
+        rsync -ahrvzKO --chown=$OWNER_USER:$OWNER_GROUP \
+          -e "ssh -p $SSH_PORT -i ./deploy_key -oStrictHostKeyChecking=no" \
+          --exclude-from='../.github/rsync/exclude_files.txt' \
+          --filter='merge ../.github/rsync/filter_files.txt' \
+          --quiet --delete-excluded --chmod='D755,F644' \
+          ./ $SSH_USER@$SSH_IP:$SITE_PATH
+        echo 'Tudo certo! 🍕'

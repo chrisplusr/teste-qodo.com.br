@@ -1,0 +1,247 @@
+name: Theme CI/CD
+
+on:
+  push:
+    branches: [ dev, stage, master ]
+    paths: [ wordpress/wp-content/themes/twentytwentyfive/**, .github/workflows/ci-cd-theme.yml, .github/.env ]
+  workflow_dispatch:
+  
+env:
+  THEME_DIR: 'wp-content/themes/twentytwentyfive'
+  
+defaults:
+  run:
+    working-directory: wordpress/wp-content/themes/twentytwentyfive
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Export a .env file to environment variables
+      uses: c-py/action-dotenv-to-setenv@v5
+      with:
+        env-file: .github/.env
+    
+    - name: Define dev variables
+      if: github.ref == 'refs/heads/dev'
+      run: |
+        echo "SSH_USER=$SSH_USER_DEV" >> $GITHUB_ENV
+        echo "OWNER_USER=$OWNER_USER_DEV" >> $GITHUB_ENV
+        echo "OWNER_GROUP=$OWNER_GROUP_DEV" >> $GITHUB_ENV               
+        echo "SSH_IP=$SSH_IP_DEV" >> $GITHUB_ENV
+        echo "SITE_PATH=$SITE_PATH_DEV" >> $GITHUB_ENV
+        echo "SSH_PORT=$SSH_PORT_DEV" >> $GITHUB_ENV
+    
+    - name: Define stage variables
+      if: github.ref == 'refs/heads/stage'
+      run: |
+        echo "SSH_USER=$SSH_USER_STAGE" >> $GITHUB_ENV
+        echo "OWNER_USER=$OWNER_USER_STAGE" >> $GITHUB_ENV
+        echo "OWNER_GROUP=$OWNER_GROUP_STAGE" >> $GITHUB_ENV               
+        echo "SSH_IP=$SSH_IP_STAGE" >> $GITHUB_ENV
+        echo "SITE_PATH=$SITE_PATH_STAGE" >> $GITHUB_ENV
+        echo "SSH_PORT=$SSH_PORT_STAGE" >> $GITHUB_ENV
+
+    - name: Define production variables
+      if: github.ref == 'refs/heads/master'
+      run: |
+        echo "SSH_USER=$SSH_USER_PROD" >> $GITHUB_ENV
+        echo "OWNER_USER=$OWNER_USER_PROD" >> $GITHUB_ENV
+        echo "OWNER_GROUP=$OWNER_GROUP_PROD" >> $GITHUB_ENV
+        echo "SSH_IP=$SSH_IP_PROD" >> $GITHUB_ENV 
+        echo "SITE_PATH=$SITE_PATH_PROD" >> $GITHUB_ENV
+        echo "SSH_PORT=$SSH_PORT_PROD" >> $GITHUB_ENV
+
+    - name: Check build files
+      id: check-files
+      run: |
+        test -f yarn.lock && echo yarn.lock exists && YARN_EXISTS=true || YARN_EXISTS=false
+        echo "YARN_EXISTS=$YARN_EXISTS" >> $GITHUB_OUTPUT
+        
+        test -f gulpfile.js && echo gulpfile.js exists && GULP_EXISTS=true || GULP_EXISTS=false
+        echo "GULP_EXISTS=$GULP_EXISTS" >> $GITHUB_OUTPUT
+
+        test -f composer.json && echo composer.json exists && COMPOSER_EXISTS=true || COMPOSER_EXISTS=false
+        echo "COMPOSER_EXISTS=$COMPOSER_EXISTS" >> $GITHUB_OUTPUT
+
+    - name: Get composer cache directory
+      if: steps.check-files.outputs.COMPOSER_EXISTS == 'true'
+      id: composer-cache
+      run: echo "COMPOSER_DIR=$(composer config cache-files-dir)" >> $GITHUB_OUTPUT
+
+    - uses: actions/cache@v4
+      if: steps.check-files.outputs.COMPOSER_EXISTS == 'true'
+      with:
+        path: ${{ steps.composer-cache.outputs.COMPOSER_DIR }}
+        key: ${{ runner.os }}-composer-${{ hashFiles('**/composer.lock') }}
+        restore-keys: ${{ runner.os }}-composer-
+
+    - name: Install composer dependencies
+      if: steps.check-files.outputs.COMPOSER_EXISTS == 'true'
+      run: composer install --no-interaction --optimize-autoloader --no-dev
+
+    - name: Setup Node.js environment
+      if: steps.check-files.outputs.YARN_EXISTS == 'true'
+      uses: actions/setup-node@v4.0.2
+      with:
+        node-version: '20'
+
+    - name: Cache Yarn Dependencies
+      uses: actions/cache@v4
+      if: steps.check-files.outputs.YARN_EXISTS == 'true'
+      id: yarn-cache
+      with:
+        path: '**/node_modules'
+        key: ${{ runner.os }}-yarn-${{ hashFiles('**/yarn.lock') }}
+
+    - name: Install Yarn Dependencies
+      if: >-
+        steps.check-files.outputs.YARN_EXISTS == 'true' &&
+        steps.check-files.outputs.GULP_EXISTS == 'false' &&
+        steps.yarn-cache.outputs.cache-hit != 'true'       
+      run: yarn install --frozen-lockfile --prefer-offline
+
+    - name: Install Yarn Dependencies with Gulp
+      if: >-
+        steps.check-files.outputs.YARN_EXISTS == 'true' &&
+        steps.check-files.outputs.GULP_EXISTS == 'true' &&
+        steps.yarn-cache.outputs.cache-hit != 'true'       
+      run: yarn install --frozen-lockfile --prefer-offline --only=dev      
+
+    - name: Build yarn dependencies
+      if: steps.check-files.outputs.YARN_EXISTS == 'true'
+      run: yarn build 
+
+    - name: Set deploy Key
+      run: |
+        echo -e "${{ secrets.WP_CARE_KEY }}" > deploy_key
+        chmod 600 ./deploy_key 
+
+    - name: Simule rsync - dev
+      if: github.ref == 'refs/heads/dev'
+      run: |
+        rsync -ahrvzKO --rsync-path="sudo rsync" --chown=$OWNER_USER:$OWNER_GROUP \
+          --dry-run --verbose --itemize-changes \
+          -e "ssh -p $SSH_PORT -i ./deploy_key -oStrictHostKeyChecking=no" \
+          --exclude-from="$GITHUB_WORKSPACE/.github/rsync/exclude_theme_files.txt" \
+          --delete-excluded --chmod='D755,F644' \
+          ./ $SSH_USER@$SSH_IP:$SITE_PATH/${{ env.THEME_DIR }}
+          
+        rsync_status=$?
+        echo $rsync_status
+
+        if (($rsync_status != 0)); then
+          echo 'Ocorreu um erro na simulação!'
+          exit 1
+        else
+          echo '👽 Tudo bem na simulação!'
+        fi
+
+    - name: Sync - dev
+      if: github.ref == 'refs/heads/dev'
+      run: |
+        rsync -ahrvzKO --rsync-path="sudo rsync" --chown=$OWNER_USER:$OWNER_GROUP \
+          -e "ssh -p $SSH_PORT -i ./deploy_key -oStrictHostKeyChecking=no" \
+          --exclude-from="$GITHUB_WORKSPACE/.github/rsync/exclude_theme_files.txt" \
+          --quiet --delete-excluded --chmod='D755,F644' \
+          ./ $SSH_USER@$SSH_IP:$SITE_PATH/${{ env.THEME_DIR }}
+
+        echo 'Tudo certo! 🍕' 
+
+    - name: Simule rsync - stage
+      if: github.ref == 'refs/heads/stage'
+      run: |
+        rsync -ahrvzKO --rsync-path="sudo rsync" --chown=$OWNER_USER:$OWNER_GROUP \
+          --dry-run --verbose --itemize-changes \
+          -e "ssh -p $SSH_PORT -i ./deploy_key -oStrictHostKeyChecking=no" \
+          --exclude-from="$GITHUB_WORKSPACE/.github/rsync/exclude_theme_files.txt" \
+          --delete-excluded --chmod='D755,F644' \
+          ./ $SSH_USER@$SSH_IP:$SITE_PATH/${{ env.THEME_DIR }}
+          
+        rsync_status=$?
+        echo $rsync_status
+
+        if (($rsync_status != 0)); then
+          echo 'Ocorreu um erro na simulação!'
+          exit 1
+        else
+          echo '👽 Tudo bem na simulação!'
+        fi
+
+    - name: Sync - stage
+      if: github.ref == 'refs/heads/stage'
+      run: |
+        rsync -ahrvzKO --rsync-path="sudo rsync" --chown=$OWNER_USER:$OWNER_GROUP \
+          -e "ssh -p $SSH_PORT -i ./deploy_key -oStrictHostKeyChecking=no" \
+          --exclude-from="$GITHUB_WORKSPACE/.github/rsync/exclude_theme_files.txt" \
+          --quiet --delete-excluded --chmod='D755,F644' \
+          ./ $SSH_USER@$SSH_IP:$SITE_PATH/${{ env.THEME_DIR }}
+
+        echo 'Tudo certo! 🍕' 
+    
+    - name: Simule rsync - MASTER
+      if: github.ref == 'refs/heads/master'
+      run: |
+        rsync -ahrvzKO --chown=$OWNER_USER:$OWNER_GROUP \
+          --dry-run --verbose --itemize-changes \
+          -e "ssh -p $SSH_PORT -i ./deploy_key -oStrictHostKeyChecking=no" \
+          --exclude-from="$GITHUB_WORKSPACE/.github/rsync/exclude_theme_files.txt" \
+          --delete-excluded --chmod='D755,F644' \
+          ./ $SSH_USER@$SSH_IP:$SITE_PATH/${{ env.THEME_DIR }}
+          
+        rsync_status=$?
+        echo $rsync_status
+
+        if (($rsync_status != 0)); then
+          echo 'Ocorreu um erro na simulação!'
+          exit 1
+        else
+          echo '👽 Tudo bem na simulação!'
+        fi
+
+    - name: Sync - MASTER
+      if: github.ref == 'refs/heads/master'
+      run: |
+        rsync -ahrvzKO --chown=$OWNER_USER:$OWNER_GROUP \
+          -e "ssh -p $SSH_PORT -i ./deploy_key -oStrictHostKeyChecking=no" \
+          --exclude-from="$GITHUB_WORKSPACE/.github/rsync/exclude_theme_files.txt" \
+          --quiet --delete-excluded --chmod='D755,F644' \
+          ./ $SSH_USER@$SSH_IP:$SITE_PATH/${{ env.THEME_DIR }}
+
+        echo 'Tudo certo! 🍕'
+
+#  tests:
+#    runs-on: ubuntu-latest
+#    needs: build
+#    timeout-minutes: 60
+#
+#    steps:
+#      - uses: actions/checkout@v4#
+#
+#      - uses: actions/setup-node@v4.0.0
+#        with:
+#          node-version: "16.x"
+#          cache: 'yarn'
+#          cache-dependency-path: './tests/visual-regression/yarn.lock'
+#
+#      - name: Install dependencies
+#        working-directory: ./tests/visual-regression
+#        run: yarn install
+#      
+#      - name: Install Playwright Browsers
+#        run: npx playwright install --with-deps
+#        working-directory: ./tests/visual-regression
+#
+#      - name: Run Playwright tests
+#        run: npx playwright test --reporter=html
+#        working-directory: ./tests/visual-regression
+#
+#      - uses: actions/upload-artifact@v3.1.0
+#        if: always()
+#        with:
+#          name: playwright-report
+#          path: ./tests/visual-regression/playwright-report
+#          retention-days: 5
